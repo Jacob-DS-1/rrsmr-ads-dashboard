@@ -1,0 +1,5 @@
+dimension,definition,notes
+Main model,average_wind + staggered_commissioning,Central supply/weather case combined with phased SMR deployment.
+SMR deployment stress-test,simultaneous_commissioning,All three SMR units are treated as available from the first commissioning year to test faster deployment.
+High-wind supply sensitivity,weather_year_role == high_wind,Higher-wind supply case retained from the canonical Objective 3 scenario cube.
+Low-wind supply stress case,weather_year_role == low_wind,Used for low-wind pressure-day and resilience analysis.

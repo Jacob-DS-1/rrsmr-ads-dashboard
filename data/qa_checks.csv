@@ -1,0 +1,8 @@
+check_name,status,expected,observed,notes
+dashboard_hourly_row_count,pass,"5,049,216 rows","5,049,216 rows",Expected count equals timestamps times FES pathways times climate members times weather roles times SMR cases.
+duplicate_scenario_hour_keys,pass,0 duplicate scenario-hour keys,0,Each scenario-hour combination appears once.
+missing_values,pass,0 missing values in dashboard hourly table,0,Dashboard-ready metric columns should be complete.
+supply_weather_case_coverage,pass,"average_wind, high_wind, low_wind","average_wind, high_wind, low_wind","The dashboard preserves average-, high-, and low-wind supply/weather cases from the canonical Objective 3 outputs."
+smr_case_coverage,pass,"simultaneous_commissioning, staggered_commissioning","simultaneous_commissioning, staggered_commissioning",Staggered commissioning and simultaneous commissioning stress-test are both available.
+annual_summary_rows,pass,576 rows,576 rows,Annual summaries cover every scenario combination from 2030 to 2045.
+whole_period_summary_rows,pass,36 rows,36 rows,Whole-period summaries cover every scenario combination.
