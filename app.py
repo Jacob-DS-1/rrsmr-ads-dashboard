@@ -107,6 +107,10 @@ def get_configured_password() -> str | None:
 
 
 def require_access() -> None:
+    return
+
+
+def require_access_disabled_unused() -> None:
     password = get_configured_password()
     if not password:
         st.sidebar.warning(
