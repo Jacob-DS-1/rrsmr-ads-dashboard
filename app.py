@@ -144,11 +144,103 @@ def load_period() -> pd.DataFrame:
     return pd.read_csv(PERIOD_PATH)
 
 
-@st.cache_data(show_spinner="Loading hourly dashboard data...")
-def load_hourly() -> pd.DataFrame:
-    df = pd.read_parquet(HOURLY_PATH)
+HOURLY_BASE_COLUMNS = (
+    "timestamp_utc",
+    "year",
+    "fes_scenario",
+    "climate_member",
+    "weather_year_role",
+    "smr_case",
+    "residual_before_smr_mw",
+    "residual_after_smr_mw",
+    "gas_needed_after_mw",
+    "surplus_after_smr_mw",
+    "gas_displacement_proxy_mw",
+    "smr_total_delivered_mw",
+    "unit1_delivered_mw",
+    "unit2_delivered_mw",
+    "unit3_delivered_mw",
+)
+
+HOURLY_EXPLORER_COLUMNS = (
+    "timestamp_utc",
+    "year",
+    "fes_scenario",
+    "climate_member",
+    "weather_year_role",
+    "smr_case",
+    "demand_mw",
+    "wind_mw",
+    "smr_total_delivered_mw",
+    "residual_before_smr_mw",
+    "residual_after_smr_mw",
+    "gas_displacement_proxy_mw",
+    "surplus_after_smr_mw",
+)
+
+SCENARIO_COLUMNS = (
+    "year",
+    "fes_scenario",
+    "climate_member",
+    "weather_year_role",
+    "smr_case",
+)
+
+DEPLOYMENT_COLUMNS = (
+    "year",
+    "fes_scenario",
+    "climate_member",
+    "weather_year_role",
+    "smr_case",
+    "unit1_delivered_mw",
+    "unit2_delivered_mw",
+    "unit3_delivered_mw",
+    "smr_total_delivered_mw",
+)
+
+
+def available_hourly_years(annual: pd.DataFrame) -> list[int]:
+    years_from_files: list[int] = []
+
+    if HOURLY_PATH.exists() and HOURLY_PATH.is_dir():
+        for path in HOURLY_PATH.glob("part_year_*.parquet"):
+            try:
+                years_from_files.append(int(path.stem.replace("part_year_", "")))
+            except ValueError:
+                pass
+
+    if years_from_files:
+        return sorted(set(years_from_files))
+
+    return sorted(annual["year"].dropna().astype(int).unique().tolist())
+
+
+@st.cache_data(show_spinner="Loading selected hourly year...", max_entries=4)
+def load_hourly_year(
+    year: int,
+    columns: tuple[str, ...] = HOURLY_BASE_COLUMNS,
+) -> pd.DataFrame:
+    year = int(year)
+
+    requested_columns = tuple(dict.fromkeys((*columns, "year", "timestamp_utc")))
+
+    year_file = HOURLY_PATH / f"part_year_{year}.parquet"
+
+    if year_file.exists():
+        df = pd.read_parquet(year_file, columns=list(requested_columns))
+    else:
+        # Fallback for local/dev layouts where HOURLY_PATH is a single Parquet dataset.
+        df = pd.read_parquet(HOURLY_PATH, columns=list(requested_columns))
+        df = df[df["year"].astype(int).eq(year)].copy()
+
     df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True)
     df["date"] = df["timestamp_utc"].dt.date
+
+    # Shrink repeated string columns in memory.
+    for col in ("fes_scenario", "climate_member", "weather_year_role", "smr_case"):
+        if col in df.columns:
+            df[col] = df[col].astype("category")
+
     return df
 
 
@@ -578,13 +670,11 @@ def scenario_explorer_page(annual: pd.DataFrame, period: pd.DataFrame, filters: 
     st.dataframe(annual_display, use_container_width=True, hide_index=True)
 
 
-def select_year_and_range(hourly: pd.DataFrame) -> tuple[int, date, date]:
-    years = sorted(hourly["year"].dropna().astype(int).unique())
+def select_year_and_range(years: list[int]) -> tuple[int, date, date]:
     default_year = 2036 if 2036 in years else years[0]
     year = st.selectbox("Year", years, index=years.index(default_year))
-    year_dates = hourly.loc[hourly["year"].eq(year), "date"]
-    min_date = min(year_dates)
-    max_date = max(year_dates)
+    min_date = date(year, 1, 1)
+    max_date = date(year + 1, 1, 1) - timedelta(days=1)
     default_start = date(year, 1, 1)
     default_end = min(default_start + timedelta(days=13), max_date)
     selected_range = st.date_input(
@@ -619,12 +709,15 @@ def hourly_filter(hourly: pd.DataFrame, filters: dict[str, str], year: int | Non
     return hourly.loc[mask].copy()
 
 
-def hourly_impact_page(hourly: pd.DataFrame, filters: dict[str, str]) -> None:
+def hourly_impact_page(annual: pd.DataFrame, filters: dict[str, str]) -> None:
     page_header(
         "Hourly system impact",
         "Inspect hourly residual demand, gas need, surplus, and true residual-load duration curves.",
     )
-    year, start_date, end_date = select_year_and_range(hourly)
+    years = available_hourly_years(annual)
+    year, start_date, end_date = select_year_and_range(years)
+
+    hourly = load_hourly_year(year, HOURLY_BASE_COLUMNS)
 
     subset = hourly_filter(hourly, filters, year=year, include_case=False)
     subset = subset[(subset["date"] >= start_date) & (subset["date"] <= end_date)].copy()
@@ -744,7 +837,7 @@ def hourly_impact_page(hourly: pd.DataFrame, filters: dict[str, str]) -> None:
         )
 
 
-def low_wind_page(hourly: pd.DataFrame, filters: dict[str, str]) -> None:
+def low_wind_page(filters: dict[str, str]) -> None:
     page_header(
         "Low-wind resilience",
         "Explore the pressure-day cases where SMR output supports the system under low-wind supply conditions.",
@@ -774,6 +867,9 @@ def low_wind_page(hourly: pd.DataFrame, filters: dict[str, str]) -> None:
     date_selected = selected["date"]
     scenario_selected = str(selected["fes_scenario"])
     climate_selected = str(selected["climate_member"])
+
+    selected_year = pd.to_datetime(date_selected).year
+    hourly = load_hourly_year(selected_year, HOURLY_BASE_COLUMNS)
 
     day_rows = hourly[
         hourly["date"].eq(date_selected)
@@ -846,8 +942,59 @@ def low_wind_page(hourly: pd.DataFrame, filters: dict[str, str]) -> None:
         )
         st.plotly_chart(fig, use_container_width=True)
 
+@st.cache_data(show_spinner="Preparing deployment summary...")
+def load_deployment_unit_energy(
+    fes_scenario: str,
+    climate_member: str,
+    weather_year_role: str,
+    smr_case: str,
+    years: tuple[int, ...],
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
 
-def deployment_page(hourly: pd.DataFrame, annual: pd.DataFrame, filters: dict[str, str]) -> None:
+    filters = {
+        "fes_scenario": fes_scenario,
+        "climate_member": climate_member,
+        "weather_year_role": weather_year_role,
+        "smr_case": smr_case,
+    }
+
+    for year in years:
+        hourly = load_hourly_year(int(year), DEPLOYMENT_COLUMNS)
+        subset = hourly_filter(hourly, filters, include_case=True)
+
+        if subset.empty:
+            continue
+
+        unit_energy = (
+            subset.groupby("year", observed=True)[
+                [
+                    "unit1_delivered_mw",
+                    "unit2_delivered_mw",
+                    "unit3_delivered_mw",
+                    "smr_total_delivered_mw",
+                ]
+            ]
+            .sum()
+            .reset_index()
+        )
+
+        frames.append(unit_energy)
+
+    if not frames:
+        return pd.DataFrame(
+            columns=[
+                "year",
+                "unit1_delivered_mw",
+                "unit2_delivered_mw",
+                "unit3_delivered_mw",
+                "smr_total_delivered_mw",
+            ]
+        )
+
+    return pd.concat(frames, ignore_index=True)
+
+def deployment_page(annual: pd.DataFrame, filters: dict[str, str]) -> None:
     page_header(
         "SMR deployment assumptions",
         "Show how the three Wylfa SMR units enter the model and how the base case differs from the stress-test.",
@@ -870,10 +1017,15 @@ def deployment_page(hourly: pd.DataFrame, annual: pd.DataFrame, filters: dict[st
             cols[1].caption(f"Planned outage window: {int(assumptions['planned_outage_window'].iloc[0])} days")
 
     st.subheader("Annual SMR output by unit")
-    unit_subset = hourly_filter(hourly, filters, include_case=True)
-    unit_energy = unit_subset.groupby("year", observed=True)[
-        ["unit1_delivered_mw", "unit2_delivered_mw", "unit3_delivered_mw", "smr_total_delivered_mw"]
-    ].sum().reset_index()
+    years = tuple(available_hourly_years(annual))
+
+    unit_energy = load_deployment_unit_energy(
+        filters["fes_scenario"],
+        filters["climate_member"],
+        filters["weather_year_role"],
+        filters["smr_case"],
+        years,
+    )
     for col in ["unit1_delivered_mw", "unit2_delivered_mw", "unit3_delivered_mw", "smr_total_delivered_mw"]:
         unit_energy[col.replace("_mw", "_twh")] = unit_energy[col] / 1_000_000
     unit_energy_long = unit_energy.melt(
@@ -1062,33 +1214,78 @@ def display_hourly_subset(subset: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def data_explorer_page(hourly: pd.DataFrame, annual: pd.DataFrame, period: pd.DataFrame, filters: dict[str, str]) -> None:
+def data_explorer_page(annual: pd.DataFrame, period: pd.DataFrame, filters: dict[str, str]) -> None:
     page_header(
         "Data explorer",
-        "Inspect dashboard-ready tables and download filtered data extracts."
+        "Inspect dashboard-ready tables and download filtered data extracts.",
     )
+
     table = st.selectbox("Table", ["Period summary", "Annual summary", "Hourly subset"])
+
     if table == "Period summary":
         display = display_period_summary(period)
         st.dataframe(display, use_container_width=True, hide_index=True)
-        st.download_button("Download period summary CSV", period.to_csv(index=False), "period_summary.csv", "text/csv")
+
+        st.download_button(
+            "Download period summary CSV",
+            period.to_csv(index=False),
+            "period_summary.csv",
+            "text/csv",
+        )
+
     elif table == "Annual summary":
         subset = filter_annual(annual, filters, include_case=False)
         display = add_context_labels(subset)
+
         display_cols = [
-            "year", "fes_scenario", "demand_climate_scenario", "supply_weather_case", "smr_case_label",
-            "annual_smr_energy_twh", "annual_gas_displacement_twh", "average_residual_before_mw",
-            "average_residual_after_mw", "surplus_hours_count", "low_wind_support_hours"
+            "year",
+            "fes_scenario",
+            "demand_climate_scenario",
+            "supply_weather_case",
+            "smr_case_label",
+            "annual_smr_energy_twh",
+            "annual_gas_displacement_twh",
+            "average_residual_before_mw",
+            "average_residual_after_mw",
+            "surplus_hours_count",
+            "low_wind_support_hours",
         ]
-        st.dataframe(display[[c for c in display_cols if c in display.columns]], use_container_width=True, hide_index=True)
-        st.download_button("Download selected annual summary CSV", subset.to_csv(index=False), "annual_summary_selected.csv", "text/csv")
+
+        st.dataframe(
+            display[[c for c in display_cols if c in display.columns]],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        st.download_button(
+            "Download selected annual summary CSV",
+            subset.to_csv(index=False),
+            "annual_summary_selected.csv",
+            "text/csv",
+        )
+
     else:
-        years = sorted(hourly["year"].dropna().astype(int).unique())
-        year = st.selectbox("Year for extract", years, index=years.index(2036) if 2036 in years else 0)
+        years = available_hourly_years(annual)
+        default_year = 2036 if 2036 in years else years[0]
+
+        year = st.selectbox(
+            "Year for extract",
+            years,
+            index=years.index(default_year),
+        )
+
+        hourly = load_hourly_year(year, HOURLY_EXPLORER_COLUMNS)
+
         subset = hourly_filter(hourly, filters, year=year, include_case=False)
+
         display = display_hourly_subset(subset.head(2000))
         st.dataframe(display, use_container_width=True, hide_index=True)
-        st.caption(f"Showing first 2,000 rows of {len(subset):,}. Use the download button for the full selected year/case comparison.")
+
+        st.caption(
+            f"Showing first 2,000 rows of {len(subset):,}. "
+            "Use the download button for the full selected year/case comparison."
+        )
+
         st.download_button(
             "Download selected hourly year CSV",
             subset.drop(columns=["date"], errors="ignore").to_csv(index=False),
@@ -1105,7 +1302,7 @@ def main() -> None:
     filters = sidebar_filters(annual)
 
     page = st.sidebar.radio(
-        "Page",
+        "Dashboard page",
         [
             "Overview",
             "Scenario explorer",
@@ -1117,29 +1314,20 @@ def main() -> None:
         ],
     )
 
-    # Load the hourly data only for pages that need it.
-    hourly_pages = {
-        "Hourly system impact",
-        "Low-wind resilience",
-        "SMR deployment assumptions",
-        "Data explorer",
-    }
-    hourly = load_hourly() if page in hourly_pages else None
-
     if page == "Overview":
         overview_page(annual, period, filters)
     elif page == "Scenario explorer":
         scenario_explorer_page(annual, period, filters)
-    elif page == "Hourly system impact" and hourly is not None:
-        hourly_impact_page(hourly, filters)
-    elif page == "Low-wind resilience" and hourly is not None:
-        low_wind_page(hourly, filters)
-    elif page == "SMR deployment assumptions" and hourly is not None:
-        deployment_page(hourly, annual, filters)
+    elif page == "Hourly system impact":
+        hourly_impact_page(annual, filters)
+    elif page == "Low-wind resilience":
+        low_wind_page(filters)
+    elif page == "SMR deployment assumptions":
+        deployment_page(annual, filters)
     elif page == "Methodology and quality checks":
         qa_methodology_page(annual, period)
-    elif page == "Data explorer" and hourly is not None:
-        data_explorer_page(hourly, annual, period, filters)
+    elif page == "Data explorer":
+        data_explorer_page(annual, period, filters)
 
     st.sidebar.divider()
     st.sidebar.caption("DATA70202 Applied Data Science group project. Not official Rolls-Royce SMR branding.")
